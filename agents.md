@@ -106,40 +106,55 @@ This implementation has been **validated against the original MATLAB code** via 
 
 See [README.md](README.md) for example outputs and the `tests/` directory for the full test suite.
 
-## Quad Extraction (Beyond Paper)
+## Quad Meshing
 
-The Corman-Crane paper produces a **seamless UV parameterization** - the input for quad meshing, not the quad mesh itself. To extract actual quads, two additional steps are needed:
+The Corman-Crane paper produces a **seamless UV parameterization** — the input for quad meshing, not the quad mesh itself.
 
-### Full Pipeline: `extract_quads.py`
-Runs RSP parameterization + libQEx quad extraction in one command:
+### Recommended: QuadriFlow (via Blender)
+
+**Use QuadriFlow for quad mesh generation.** It produces pure quad meshes with curvature-aligned edges in a single step, with no intermediate parameterization/quantization/extraction pipeline.
+
+QuadriFlow is built into Blender (5.0+). Usage:
+
 ```bash
-python extract_quads.py mesh.obj -o Results/ --scale 10 -v
+blender --background --python-expr "
+import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.wm.obj_import(filepath='input.obj')
+obj = bpy.context.selected_objects[0]
+bpy.context.view_layer.objects.active = obj
+bpy.ops.object.quadriflow_remesh(
+    target_faces=2000,
+    use_preserve_boundary=True,
+    seed=0
+)
+bpy.ops.wm.obj_export(filepath='output_quads.obj', export_selected_objects=True)
+"
 ```
-Options:
-- `--scale N` - Scale UVs to control quad density (higher = more quads)
-- `--preprocess` - Clean mesh with PyMeshLab before RSP (for problematic meshes)
-- `--skip-rsp` - Use existing `*_param.obj` file
 
-Output: `Results/<mesh>_quads.obj`
+Results (pure quads, 0 triangles, no holes):
+- Pig (1843 verts) → 2146 quads
+- Bunny (2503 verts) → 1764 quads
 
-**Note:** Triangular holes at singularities are expected (where cross field has +90° or -90° rotation).
+QuadriFlow (Huang et al., SGP 2018) is MIT-licensed. Source: https://github.com/hjwdzh/QuadriFlow
 
-### 1. Quantization
-Snap singularities to integer UV coordinates. Uses [pyquantization](https://github.com/mfagerlund/pyquantization) (Python bindings for Coudert-Osmont et al., 2024). Install: `pip install pyquantization` or `pip install C:/Dev/pyquantization`.
+### Why not RSP + libQEx?
 
-### 2. Quad Extraction with libQEx
-We use [libQEx](https://github.com/hcebke/libQEx) (GPL, SIGGRAPH Asia 2013) for robust quad mesh extraction from integer-grid maps.
+The RSP parameterization → quantization → libQEx extraction pipeline is broken in practice:
+1. RSP produces near-degenerate UV faces at cut seams (det ~1e-6)
+2. The quantizer (pyquantization) rejects these faces or runs out of memory
+3. Without quantization, the raw UVs have floating-point errors at every cut edge
+4. libQEx (and our Python port) hit hundreds of path-tracing failures on non-trivial meshes
+5. Result: 5-20% missing quads, holes everywhere
 
-**Pre-built binaries** are included in `bin/` (Windows x64 only). No build required.
+The RSP parameterization itself is valid (0 flipped triangles, verified against MATLAB/Octave). The downstream toolchain for converting UVs to quads is the broken part.
 
-To build from source (optional):
-- CMake 2.6+, Visual Studio with SSE support
-- [OpenMesh](https://www.graphics.rwth-aachen.de/software/openmesh/) library
-- See `docs/libqex_setup.md`
+### Legacy code (kept for reference)
 
-**References:**
-- libQEx paper: [QEx: Robust Quad Mesh Extraction](https://dl.acm.org/doi/10.1145/2508363.2508372)
-- Algorithm details: `docs/algo_integer_grid_maps.md`
+- `utils/quad_extractor.py` — Python port of libQEx's MeshExtractorT.cc (~1740 lines, 52 tests)
+- `utils/libqex_wrapper.py` — Hole-filling utilities
+- `quadmesh.py` — Full pipeline (RSP + quantization + extraction)
+- `extract_quads.py` — RSP + extraction without quantization
 
 ## Mesh Preprocessing
 
