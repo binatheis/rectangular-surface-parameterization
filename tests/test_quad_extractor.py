@@ -400,7 +400,7 @@ class TestExtractTorus:
     def test_produces_quads(self, torus_data):
         V, T, uv = torus_data
         qv, qf, tf = extract_quads(V, T, uv * 10, verbose=False, fill_holes=False)
-        assert len(qf) >= 70, f"Expected >=70 quads, got {len(qf)}"
+        assert len(qf) >= 80, f"Expected >=80 quads, got {len(qf)}"
 
     def test_no_non_manifold(self, torus_data):
         V, T, uv = torus_data
@@ -413,6 +413,21 @@ class TestExtractTorus:
         qv, qf, tf = extract_quads(V, T, uv * 10, verbose=False, fill_holes=False)
         for i, q in enumerate(qf):
             assert len(set(q)) == 4, f"Quad {i} degenerate"
+
+    def test_no_self_edges(self, torus_data):
+        V, T, uv = torus_data
+        _, all_faces = _run_full_pipeline(V, T, uv * 10)
+        for i, f in enumerate(all_faces):
+            for j in range(len(f)):
+                assert f[j] != f[(j + 1) % len(f)], \
+                    f"Face {i} has self-edge at vertex {f[j]}"
+
+    def test_no_duplicate_vertices_in_quads(self, torus_data):
+        V, T, uv = torus_data
+        qv, qf, _ = extract_quads(V, T, uv * 10, verbose=False, fill_holes=False)
+        for i, q in enumerate(qf):
+            assert len(set(q)) == 4, \
+                f"Quad {i} has duplicate vertex: {q}"
 
 
 # =========================================================================
