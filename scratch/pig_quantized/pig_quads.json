@@ -1,0 +1,17 @@
+{
+  "format": "quadmesh_uv_v2",
+  "generator": "Corman-Crane RSP + pyquantization + libQEx",
+  "source_mesh": "Mesh\\pig.obj",
+  "scale": 50.0,
+  "quantized": false,
+  "stats": {
+    "input_mesh": "Mesh\\pig.obj",
+    "timestamp": "2026-04-16T10:26:07.277994",
+    "scale": 50.0,
+    "preprocessed": true,
+    "quantized": false,
+    "quads_raw": 2726,
+    "quads": 2726,
+    "quads_source": "raw"
+  }
+}

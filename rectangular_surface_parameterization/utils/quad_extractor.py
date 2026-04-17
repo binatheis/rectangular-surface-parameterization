@@ -1738,6 +1738,16 @@ def extract_quads(vertices, triangles, uv_per_triangle,
 
     quad_faces = np.array(quad_faces_list, dtype=np.int32) if quad_faces_list else np.zeros((0, 4), dtype=np.int32)
 
+    # Build set of output vertex indices that sit on original mesh boundaries.
+    # Holes consisting entirely of these vertices are original mesh holes
+    # (e.g., bunny open bottom) and should NOT be filled.
+    boundary_verts_out = set()
+    for old_idx in sorted(used):
+        gv = gvertices[old_idx]
+        if gv.is_boundary:
+            new_idx = old_to_new[old_idx] if len(used) < len(gvertices) else old_idx
+            boundary_verts_out.add(new_idx)
+
     # Fill holes if requested
     tri_faces = None
     if fill_holes and len(quad_faces) > 0:
@@ -1746,7 +1756,8 @@ def extract_quads(vertices, triangles, uv_per_triangle,
                 _fill_holes_with_triangles)
             hole_tris, new_verts = _fill_holes_with_triangles(
                 out_vertices, quad_faces, verbose=verbose,
-                max_hole_size=max_hole_size)
+                max_hole_size=max_hole_size,
+                original_boundary_verts=boundary_verts_out)
             if hole_tris:
                 tri_faces = np.array(hole_tris, dtype=np.int32)
                 if len(new_verts) > 0:

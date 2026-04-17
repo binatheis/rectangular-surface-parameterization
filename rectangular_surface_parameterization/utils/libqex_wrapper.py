@@ -35,13 +35,17 @@ def _ensure_pyqex():
     return _pyqex
 
 
-def _fill_holes_with_triangles(vertices, quads, verbose=True, max_hole_size=None):
+def _fill_holes_with_triangles(vertices, quads, verbose=True, max_hole_size=None,
+                               original_boundary_verts=None):
     """
     Fill holes in a quad mesh with triangles.
 
     Traces boundary loops using quad face orientation to correctly handle
     cases where multiple holes share vertices. Each loop is fan-triangulated
     from its own centroid.
+
+    Holes where ALL vertices are on the original mesh boundary are skipped
+    (these are real holes like open mesh boundaries, not extraction artifacts).
 
     Parameters
     ----------
@@ -51,6 +55,9 @@ def _fill_holes_with_triangles(vertices, quads, verbose=True, max_hole_size=None
         Quad face indices (0-based).
     verbose : bool
         Print information about holes filled.
+    original_boundary_verts : set of int or None
+        Vertex indices that sit on original mesh boundary edges.
+        Holes consisting entirely of these vertices are not filled.
 
     Returns
     -------
@@ -263,6 +270,13 @@ def _fill_holes_with_triangles(vertices, quads, verbose=True, max_hole_size=None
             skipped_holes += 1
             if verbose:
                 print(f"  Skipping hole with {len(loop)} edges (> max_hole_size={max_hole_size})")
+            continue
+
+        # Skip holes on the original mesh boundary (real holes, not artifacts)
+        if original_boundary_verts and all(v in original_boundary_verts for v in loop):
+            skipped_holes += 1
+            if verbose:
+                print(f"  Skipping original mesh boundary hole with {len(loop)} edges")
             continue
 
         # Compute centroid
