@@ -15,7 +15,8 @@ import click
 import numpy as np
 import json
 import sys
-import subprocess
+import contextlib
+import io
 from pathlib import Path
 from datetime import datetime
 
@@ -236,27 +237,33 @@ def main(mesh, output_dir, scale, target_faces, frame_field,
             click.secho(f"\n[{stage}/{n_stages}] Parameterization (RSP)", fg='blue', bold=True)
             status("Running RSP algorithm...")
 
-        rsp_cmd = [
-            sys.executable, str(project_root / "run_RSP.py"),
+        rsp_args = [
             str(working_mesh),
             "-o", str(output_dir),
             "--frame-field", frame_field,
         ]
         if no_hardedge:
-            rsp_cmd.append("--no-hardedge")
+            rsp_args.append("--no-hardedge")
         if verbose:
-            rsp_cmd.append("-v")
+            rsp_args.append("-v")
 
-        result = subprocess.run(rsp_cmd, capture_output=not verbose, text=True)
+        old_argv = sys.argv[:]
+        try:
+            import run_RSP
 
-        if result.returncode != 0:
+            sys.argv = ["run_RSP.py", *rsp_args]
+            if verbose:
+                rsp_return = run_RSP.main()
+            else:
+                rsp_output = io.StringIO()
+                with contextlib.redirect_stdout(rsp_output), contextlib.redirect_stderr(rsp_output):
+                    rsp_return = run_RSP.main()
+        finally:
+            sys.argv = old_argv
+
+        if rsp_return not in (None, 0):
             error("RSP parameterization failed")
-            if not verbose and result.stderr:
-                click.echo(result.stderr)
             return 1
-
-        if verbose and result.stdout:
-            click.echo(result.stdout)
 
         param_name = working_mesh.stem
         param_path = output_dir / f"{param_name}_param.obj"

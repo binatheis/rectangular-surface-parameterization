@@ -35,6 +35,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Multimedia :: Graphics :: 3D Modeling"
 ]
@@ -43,7 +44,8 @@ dependencies = [
     "numpy>=1.20.0",
     "scipy>=1.7.0",
     "matplotlib>=3.4.0",
-    "trimesh>=3.0.0"
+    "trimesh>=3.0.0",
+    "click>=8.0.0"
 ]
 
 [project.optional-dependencies]
