@@ -19,6 +19,101 @@ from typing import Optional, Tuple
 import warnings
 
 
+def _count_boundary_edges(ms) -> Optional[int]:
+    """Return the number of boundary (border) edges, or None if unavailable."""
+    try:
+        info = ms.get_topological_measures()
+        return int(info.get('boundary_edges', 0))
+    except Exception:
+        return None
+
+
+def _close_all_holes(ms, verbose: bool = False) -> None:
+    """Close all holes iteratively so the surface becomes watertight.
+
+    Uses increasing maximum hole sizes and stops as soon as no boundary edge
+    remains. This only adds faces to fill existing holes, so it does not alter
+    the appearance of the genuine surface.
+    """
+    try:
+        for max_size in [100, 1000, 10000, 100000, 1000000]:
+            ms.meshing_close_holes(maxholesize=max_size)
+            n_border = _count_boundary_edges(ms)
+            if n_border == 0:
+                break
+    except Exception as e:  # pragma: no cover - depends on pymeshlab version
+        if verbose:
+            print(f"    Hole closing skipped: {e}")
+
+
+def _keep_largest_connected_component(ms, verbose: bool = False) -> bool:
+    """Keep only the largest connected component of the current mesh.
+
+    RSP (and the connectivity/DEC stages) require a single connected,
+    manifold surface. Decimation and repair can leave small disconnected
+    islands or split the mesh. Dropping everything but the largest component
+    removes only floating debris while preserving the main surface, so the
+    final appearance is not degraded.
+
+    Returns True if the mesh was modified.
+    """
+    # Fast path: skip work when the mesh is already a single component.
+    try:
+        n_cc = ms.get_topological_measures().get('connected_components_number', None)
+        if n_cc is not None and int(n_cc) <= 1:
+            return False
+    except Exception:
+        pass  # Fall through and let trimesh decide.
+
+    try:
+        import trimesh
+    except ImportError:
+        if verbose:
+            print("    trimesh not available; cannot isolate largest component")
+        return False
+
+    import tempfile
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.ply', delete=False) as f:
+            tmp_path = f.name
+        ms.save_current_mesh(tmp_path)
+
+        mesh = trimesh.load(tmp_path, process=False)
+        if isinstance(mesh, trimesh.Scene):
+            if len(mesh.geometry) == 0:
+                return False
+            mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+
+        components = mesh.split(only_watertight=False)
+        if len(components) <= 1:
+            return False
+
+        largest = max(components, key=lambda c: len(c.faces))
+        dropped_components = len(components) - 1
+        dropped_faces = len(mesh.faces) - len(largest.faces)
+
+        largest.export(tmp_path)
+        ms.load_new_mesh(tmp_path)  # becomes the current mesh
+
+        if verbose:
+            print(f"    Kept largest of {len(components)} components "
+                  f"(dropped {dropped_components} component(s), "
+                  f"{dropped_faces} face(s))")
+        return True
+    except Exception as e:  # pragma: no cover - depends on optional deps
+        if verbose:
+            print(f"    Largest-component extraction skipped: {e}")
+        return False
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+
+
 def preprocess_mesh(
     input_path: str,
     output_path: Optional[str] = None,
@@ -100,21 +195,17 @@ def preprocess_mesh(
     except Exception:
         pass
 
+    # Step 4b: Keep only the largest connected component
+    # RSP requires a single connected surface. Drop floating islands/debris
+    # early so the decimation budget is spent on the main surface only.
+    if verbose:
+        print("  Keeping largest connected component...")
+    _keep_largest_connected_component(ms, verbose=verbose)
+
     # Step 5: Close ALL holes to make mesh watertight
     if verbose:
         print("  Closing holes...")
-    try:
-        # Close holes iteratively with increasing max size
-        for max_size in [100, 1000, 10000, 100000, 1000000]:
-            ms.meshing_close_holes(maxholesize=max_size)
-            try:
-                info = ms.get_topological_measures()
-                if info['boundary_edges'] == 0:
-                    break
-            except Exception:
-                pass
-    except Exception:
-        pass
+    _close_all_holes(ms, verbose=verbose)
 
     # Step 6: Close remaining small holes (e.g., triangular holes that pymeshlab misses)
     try:
@@ -173,8 +264,15 @@ def preprocess_mesh(
             print(f"  Decimating from {current_faces} to ~{target_faces} faces...")
         try:
             ms.meshing_decimation_quadric_edge_collapse(targetfacenum=target_faces)
-            # Re-close any holes that appeared from decimation
-            ms.meshing_close_holes(maxholesize=1000)
+            # Decimation can split the surface and open new holes. Repair
+            # non-manifold geometry, drop any newly disconnected debris and
+            # re-close holes so the result stays a single watertight surface.
+            try:
+                ms.meshing_repair_non_manifold_edges()
+            except Exception:
+                pass
+            _keep_largest_connected_component(ms, verbose=verbose)
+            _close_all_holes(ms, verbose=verbose)
         except Exception as e:
             if verbose:
                 print(f"    Decimation failed: {e}")
@@ -185,7 +283,7 @@ def preprocess_mesh(
 
         # Compute target edge length if not specified
         if target_edge_length is None:
-            bbox = mesh.bounding_box()
+            bbox = ms.current_mesh().bounding_box()
             diagonal = np.sqrt(
                 (bbox.max()[0] - bbox.min()[0])**2 +
                 (bbox.max()[1] - bbox.min()[1])**2 +
@@ -211,6 +309,14 @@ def preprocess_mesh(
     ms.meshing_remove_duplicate_vertices()
     ms.meshing_remove_unreferenced_vertices()
 
+    # Step 9b: Final robustness pass before RSP.
+    # Guarantee a single connected component and a watertight surface even if
+    # the previous steps (decimation, remeshing, hole closing) reintroduced
+    # disconnections or holes. Both helpers are no-ops when already satisfied.
+    _keep_largest_connected_component(ms, verbose=verbose)
+    _close_all_holes(ms, verbose=verbose)
+    ms.meshing_remove_unreferenced_vertices()
+
     # Get final stats
     mesh = ms.current_mesh()
     n_verts_final = mesh.vertex_number()
@@ -218,6 +324,18 @@ def preprocess_mesh(
 
     if verbose:
         print(f"  Final: {n_verts_final} vertices, {n_faces_final} faces")
+        n_border_final = _count_boundary_edges(ms)
+        try:
+            n_cc_final = ms.get_topological_measures().get(
+                'connected_components_number', None)
+        except Exception:
+            n_cc_final = None
+        if n_border_final:
+            print(f"  WARNING: mesh still has {n_border_final} boundary edge(s); "
+                  f"RSP connectivity may fail.")
+        if n_cc_final is not None and int(n_cc_final) > 1:
+            print(f"  WARNING: mesh still has {int(n_cc_final)} connected "
+                  f"components; RSP requires a single component.")
 
     # Save result
     ms.save_current_mesh(str(output_path))
