@@ -59,6 +59,9 @@ preprocessing = [
 quantization = [
     "pyquantization>=0.1.0"
 ]
+speedups = [
+    "numba>=0.59.0"
+]
 
 [project.urls]
 Homepage = "https://github.com/mfagerlund/rectangular-surface-parameterization"

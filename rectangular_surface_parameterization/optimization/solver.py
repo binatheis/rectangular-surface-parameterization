@@ -156,12 +156,13 @@ def optimize_RSP(
     # d0d(param.ide_hard,:) = 0;
     # d0d(param.ide_bound,:) = 0;
 
-    # Make a copy and zero out hard and boundary edges
-    d0d = dec.d0d.copy()
-    if hasattr(param, 'ide_hard') and len(param.ide_hard) > 0:
-        d0d = _zero_rows(d0d, param.ide_hard)
-    if hasattr(param, 'ide_bound') and len(param.ide_bound) > 0:
-        d0d = _zero_rows(d0d, param.ide_bound)
+    # d0d with hard/boundary edge rows zeroed. Cached on dec and shared with
+    # oracle_integrability_condition so it is assembled once per mesh.
+    from rectangular_surface_parameterization.optimization.assembly_cache import (
+        get_zeroed_d0d,
+    )
+
+    d0d = get_zeroed_d0d(dec, param)
 
     # flag = 1;
     # fct = zeros(itmax+1,1);

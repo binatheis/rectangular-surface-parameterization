@@ -7,6 +7,10 @@ import numpy as np
 import scipy.sparse as sp
 from typing import Optional, Tuple
 
+from rectangular_surface_parameterization.optimization.assembly_cache import (
+    get_assembly_cache,
+)
+
 
 def omega_from_scale(
     mesh,
@@ -98,42 +102,26 @@ def omega_from_scale(
     S3_c2 = cot_ang[:, 1] * (sin_2ff3 * (cot_ang[:, 2] + cot_ang[:, 0]))
     S3_c3 = cot_ang[:, 1] * (-cos_2ff3 - sin_2ff3 * cot_ang[:, 0])
 
-    # Build I, J, S arrays for Dv_tri sparse matrix (ne x 3*nf)
-    # I = mesh.T2E(:,[1 1 1 2 2 2 3 3 3]) -> repeat each edge column 3 times
-    # Each face contributes 9 entries
-    I_arr = np.column_stack([
-        edge_idx[:, 0], edge_idx[:, 0], edge_idx[:, 0],
-        edge_idx[:, 1], edge_idx[:, 1], edge_idx[:, 1],
-        edge_idx[:, 2], edge_idx[:, 2], edge_idx[:, 2]
-    ]).ravel()  # (9*nf,)
+    # The (row, col) pattern of Dv_tri, the per-entry signs and the
+    # invariant left block of O (-star1p @ d0p_tri) only depend on the mesh
+    # topology, so they are assembled once and cached on ``dec``. Here we
+    # only recompute the per-iteration values and scatter them into the
+    # cached pattern (build indices once, update only values).
+    cache = get_assembly_cache(dec, mesh)
 
-    # Signs for each entry
-    signs_arr = np.column_stack([
-        edge_sign[:, 0], edge_sign[:, 0], edge_sign[:, 0],
-        edge_sign[:, 1], edge_sign[:, 1], edge_sign[:, 1],
-        edge_sign[:, 2], edge_sign[:, 2], edge_sign[:, 2]
-    ]).ravel()  # (9*nf,)
-
-    # J indices: corner indices repeated per edge
-    J_arr = np.column_stack([
-        corner_indices[:, 0], corner_indices[:, 1], corner_indices[:, 2],  # edge 1
-        corner_indices[:, 0], corner_indices[:, 1], corner_indices[:, 2],  # edge 2
-        corner_indices[:, 0], corner_indices[:, 1], corner_indices[:, 2]   # edge 3
-    ]).ravel()  # (9*nf,)
-
-    # S values
-    S_arr = 0.5 * signs_arr * np.column_stack([
+    # S values (9*nf,), same ordering as the cached pattern/signs
+    S_arr = 0.5 * cache.dv_signs * np.column_stack([
         S1_c1, S1_c2, S1_c3,
         S2_c1, S2_c2, S2_c3,
         S3_c1, S3_c2, S3_c3
     ]).ravel()  # (9*nf,)
 
     # Dv_tri = sparse(abs(I), J, S, mesh.num_edges, 3*mesh.num_faces);
-    Dv_tri = sp.coo_matrix((S_arr, (I_arr, J_arr)), shape=(ne, 3 * nf)).tocsr()
+    Dv_tri = cache.dv_assembler.build(S_arr)
 
     # O = [-dec.star1p*dec.d0p_tri, Dv_tri];
     # O is (ne x 6*nf): first 3*nf columns for ut, last 3*nf columns for vt
-    O = sp.hstack([-dec.star1p @ dec.d0p_tri, Dv_tri])
+    O = sp.hstack([cache.O_left, Dv_tri])
 
     # if exist('Reduction','var') && ~isempty(Reduction)
     #     Or = O*Reduction;
@@ -168,11 +156,8 @@ def omega_from_scale(
         dO_S2 = edge_sign[:, 1] * dO_S2
         dO_S3 = edge_sign[:, 2] * dO_S3
 
-        # Build sparse matrix: each face contributes to 3 edges
-        dO_I = np.concatenate([edge_idx[:, 0], edge_idx[:, 1], edge_idx[:, 2]])
-        dO_J = np.concatenate([np.arange(nf), np.arange(nf), np.arange(nf)])
+        # dO shares a fixed pattern (cached); only the values change.
         dO_S = np.concatenate([dO_S1, dO_S2, dO_S3])
-
-        dO = sp.coo_matrix((dO_S, (dO_I, dO_J)), shape=(ne, nf)).tocsr()
+        dO = cache.dO_assembler.build(dO_S)
 
     return O, Or, dO

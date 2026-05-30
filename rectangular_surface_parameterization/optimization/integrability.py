@@ -8,6 +8,10 @@ import scipy.sparse as sp
 from typing import Optional, Tuple, Union
 
 from rectangular_surface_parameterization.optimization.omega_from_scale import omega_from_scale
+from rectangular_surface_parameterization.optimization.assembly_cache import (
+    get_assembly_cache,
+    get_zeroed_d0d,
+)
 
 
 # function [F,Jf,Hf] = oracle_integrability_condition(mesh, param, dec, omega, ut, vt, ang, lambda, Reduction, ide_free)
@@ -74,15 +78,9 @@ def oracle_integrability_condition(
     # d0d(param.ide_hard,:) = 0;
     # d0d(param.ide_bound,:) = 0;
 
-    # Copy d0d and zero out hard and boundary edge rows
-    d0d = dec.d0d.copy().tolil()
-    if hasattr(param, 'ide_hard') and len(param.ide_hard) > 0:
-        for idx in param.ide_hard:
-            d0d[idx, :] = 0
-    if hasattr(param, 'ide_bound') and len(param.ide_bound) > 0:
-        for idx in param.ide_bound:
-            d0d[idx, :] = 0
-    d0d = d0d.tocsr()
+    # d0d with hard/boundary edge rows zeroed. This only depends on dec and
+    # the edge sets, so it is cached on dec and reused across iterations.
+    d0d = get_zeroed_d0d(dec, param)
 
     # [O,Or,dO] = omega_from_scale(mesh, param, dec, ut, vt, ang, Reduction);
 
@@ -165,12 +163,6 @@ def oracle_integrability_condition(
     #            le(:,3).*cot_ang(:,2).*(-cos_2ff3.*cot_ang(:,1) + sin_2ff3);
     #     D_vth = sparse(I, J, [dvS1, dvS2, dvS3], mesh.num_faces, 3*mesh.num_faces);
 
-    # Build row/column indices for sparse matrix
-    # I: nf x 3 matrix where each row is [i, i, i] (0-indexed face indices)
-    # J: nf x 3 matrix where each row is [i, nf+i, 2*nf+i] (0-indexed corner indices)
-    I_rows = np.tile(np.arange(mesh.num_faces).reshape(-1, 1), (1, 3))
-    J_cols = np.arange(3 * mesh.num_faces).reshape((mesh.num_faces, 3), order='F')
-
     dvS1 = (le[:, 0] * cot_ang[:, 2] * (-cos_2ff1 * cot_ang[:, 1] + sin_2ff1) +
             le[:, 1] * cot_ang[:, 0] * cos_2ff2 * (cot_ang[:, 2] + cot_ang[:, 1]) +
             le[:, 2] * cot_ang[:, 1] * (-cos_2ff3 * cot_ang[:, 2] - sin_2ff3))
@@ -181,11 +173,10 @@ def oracle_integrability_condition(
             le[:, 1] * cot_ang[:, 0] * (-cos_2ff2 * cot_ang[:, 1] - sin_2ff2) +
             le[:, 2] * cot_ang[:, 1] * (-cos_2ff3 * cot_ang[:, 0] + sin_2ff3))
 
+    # D_vth shares a fixed (row, col) pattern (cached); only values change.
+    cache = get_assembly_cache(dec, mesh)
     dvS = np.column_stack([dvS1, dvS2, dvS3])
-    D_vth = sp.coo_matrix(
-        (dvS.ravel('F'), (I_rows.ravel('F'), J_cols.ravel('F'))),
-        shape=(mesh.num_faces, 3 * mesh.num_faces)
-    ).tocsr()
+    D_vth = cache.dvth_assembler.build(dvS.ravel('F'))
 
     #     assert(max(abs(D_vth*vt(:) - dO'*lambda_full)) < 1e-6, 'Second derivative of constraints is invalid.');
 
