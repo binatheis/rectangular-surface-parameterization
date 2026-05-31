@@ -2,10 +2,16 @@
 Mesh preprocessing utilities to prepare meshes for the RSP pipeline.
 
 Uses PyMeshLab to clean and remesh input meshes to meet pipeline requirements:
-- Manifold geometry (each edge shared by exactly 2 triangles)
-- Closed surface (no boundary edges)
+- Manifold geometry (each edge shared by at most 2 triangles)
+- A single connected surface (RSP parameterizes one connected component;
+  tiny floating debris is removed, but legitimate separate parts are kept
+  and reported as an error instead of being silently deleted)
 - Well-shaped triangles (avoid very obtuse/skinny triangles)
 - Consistent orientation
+
+Note: boundaries/holes are preserved by default. RSP supports surfaces with
+boundary, so intentional openings (e.g. a model's eye sockets) are NOT
+filled unless ``close_holes=True`` is explicitly requested.
 
 Usage:
     from rectangular_surface_parameterization.utils.preprocess_mesh import preprocess_mesh
@@ -46,31 +52,15 @@ def _close_all_holes(ms, verbose: bool = False) -> None:
             print(f"    Hole closing skipped: {e}")
 
 
-def _keep_largest_connected_component(ms, verbose: bool = False) -> bool:
-    """Keep only the largest connected component of the current mesh.
+def _connected_components(ms):
+    """Return the connected components of the current mesh as trimesh meshes.
 
-    RSP (and the connectivity/DEC stages) require a single connected,
-    manifold surface. Decimation and repair can leave small disconnected
-    islands or split the mesh. Dropping everything but the largest component
-    removes only floating debris while preserving the main surface, so the
-    final appearance is not degraded.
-
-    Returns True if the mesh was modified.
+    Returns None if trimesh is unavailable or the mesh cannot be analyzed.
     """
-    # Fast path: skip work when the mesh is already a single component.
-    try:
-        n_cc = ms.get_topological_measures().get('connected_components_number', None)
-        if n_cc is not None and int(n_cc) <= 1:
-            return False
-    except Exception:
-        pass  # Fall through and let trimesh decide.
-
     try:
         import trimesh
     except ImportError:
-        if verbose:
-            print("    trimesh not available; cannot isolate largest component")
-        return False
+        return None
 
     import tempfile
 
@@ -83,29 +73,12 @@ def _keep_largest_connected_component(ms, verbose: bool = False) -> bool:
         mesh = trimesh.load(tmp_path, process=False)
         if isinstance(mesh, trimesh.Scene):
             if len(mesh.geometry) == 0:
-                return False
+                return []
             mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
 
-        components = mesh.split(only_watertight=False)
-        if len(components) <= 1:
-            return False
-
-        largest = max(components, key=lambda c: len(c.faces))
-        dropped_components = len(components) - 1
-        dropped_faces = len(mesh.faces) - len(largest.faces)
-
-        largest.export(tmp_path)
-        ms.load_new_mesh(tmp_path)  # becomes the current mesh
-
-        if verbose:
-            print(f"    Kept largest of {len(components)} components "
-                  f"(dropped {dropped_components} component(s), "
-                  f"{dropped_faces} face(s))")
-        return True
-    except Exception as e:  # pragma: no cover - depends on optional deps
-        if verbose:
-            print(f"    Largest-component extraction skipped: {e}")
-        return False
+        return list(mesh.split(only_watertight=False))
+    except Exception:
+        return None
     finally:
         if tmp_path is not None:
             try:
@@ -114,13 +87,103 @@ def _keep_largest_connected_component(ms, verbose: bool = False) -> bool:
                 pass
 
 
+def _remove_small_debris(ms, debris_fraction: float = 0.02,
+                         verbose: bool = False) -> Optional[int]:
+    """Remove only tiny floating components ("debris"), keeping every
+    significant part of the mesh.
+
+    A component counts as debris when it has fewer faces than
+    ``debris_fraction`` times the largest component. This clears stray
+    islands left by repair/decimation WITHOUT ever deleting legitimate
+    separate parts (e.g. a model's eyes or ears), so the visible shape is
+    preserved.
+
+    Returns
+    -------
+    int or None
+        Number of *significant* connected components remaining, or None if
+        the component structure could not be determined (trimesh missing).
+    """
+    # Fast path: a single component needs no analysis.
+    try:
+        n_cc = ms.get_topological_measures().get('connected_components_number', None)
+        if n_cc is not None and int(n_cc) <= 1:
+            return 1
+    except Exception:
+        pass
+
+    components = _connected_components(ms)
+    if components is None:
+        if verbose:
+            print("    trimesh not available; cannot analyze connected components")
+        return None
+    if len(components) <= 1:
+        return 1
+
+    largest_faces = max(len(c.faces) for c in components)
+    threshold = max(1.0, debris_fraction * largest_faces)
+    significant = [c for c in components if len(c.faces) >= threshold]
+    debris = [c for c in components if len(c.faces) < threshold]
+
+    if debris:
+        try:
+            import trimesh
+            import tempfile
+
+            kept = (significant[0] if len(significant) == 1
+                    else trimesh.util.concatenate(significant))
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.ply', delete=False) as f:
+                    tmp_path = f.name
+                kept.export(tmp_path)
+                ms.load_new_mesh(tmp_path)
+            finally:
+                if tmp_path is not None:
+                    try:
+                        Path(tmp_path).unlink()
+                    except Exception:
+                        pass
+            if verbose:
+                dropped_faces = sum(len(c.faces) for c in debris)
+                print(f"    Removed {len(debris)} tiny debris component(s) "
+                      f"({dropped_faces} face(s)); kept {len(significant)} "
+                      f"significant component(s)")
+        except Exception as e:  # pragma: no cover - depends on optional deps
+            if verbose:
+                print(f"    Debris removal skipped: {e}")
+
+    return len(significant)
+
+
+def _raise_if_multiple_components(n_significant: Optional[int]) -> None:
+    """Raise a clear error when the mesh has more than one significant part.
+
+    RSP parameterizes a single connected surface; it cannot treat several
+    disconnected parts as one. We refuse to silently delete legitimate parts
+    (which would mutilate models such as Blender's Suzanne), and instead stop
+    with an actionable message.
+    """
+    if n_significant is not None and n_significant > 1:
+        raise ValueError(
+            f"Mesh has {n_significant} significant connected components. "
+            f"RSP parameterizes a single connected surface and cannot process "
+            f"multiple disconnected parts as one. Separate the mesh and run the "
+            f"pipeline on one component at a time, or join the parts into a "
+            f"single connected surface before running it. (Tiny debris is "
+            f"removed automatically; these are real parts, so they are kept.)"
+        )
+
+
 def preprocess_mesh(
     input_path: str,
     output_path: Optional[str] = None,
     target_edge_length: Optional[float] = None,
     target_faces: Optional[int] = None,
     remesh_iterations: int = 5,
-    verbose: bool = True
+    verbose: bool = True,
+    close_holes: bool = False,
+    debris_fraction: float = 0.02
 ) -> str:
     """
     Preprocess a mesh for the RSP pipeline.
@@ -140,11 +203,28 @@ def preprocess_mesh(
         Number of remeshing iterations (default: 5)
     verbose : bool
         Print progress information
+    close_holes : bool
+        Fill boundary holes to make the surface watertight. Disabled by
+        default: RSP tolerates boundaries, and closing holes would destroy
+        intentional openings (e.g. a model's eye sockets). Enable only when
+        a mesh has genuine defects you explicitly want filled.
+    debris_fraction : float
+        A connected component is treated as removable "debris" when it has
+        fewer faces than this fraction of the largest component (default
+        0.02 = 2%). Significant separate parts are always kept.
 
     Returns
     -------
     str
         Path to the cleaned mesh file.
+
+    Raises
+    ------
+    ValueError
+        If the mesh still has more than one significant connected component
+        after debris removal. RSP can only parameterize a single connected
+        surface, so we stop with an actionable message instead of silently
+        deleting legitimate parts.
     """
     try:
         import pymeshlab
@@ -195,57 +275,24 @@ def preprocess_mesh(
     except Exception:
         pass
 
-    # Step 4b: Keep only the largest connected component
-    # RSP requires a single connected surface. Drop floating islands/debris
-    # early so the decimation budget is spent on the main surface only.
+    # Step 4b: Remove tiny floating debris (non-destructive).
+    # RSP requires a single connected surface, but we must NOT delete
+    # legitimate separate parts (eyes, ears, ...). We only strip negligible
+    # debris and then fail loudly if several significant parts remain, so
+    # the user can decide how to handle a genuinely multi-part model.
     if verbose:
-        print("  Keeping largest connected component...")
-    _keep_largest_connected_component(ms, verbose=verbose)
+        print("  Removing tiny debris components...")
+    n_significant = _remove_small_debris(ms, debris_fraction=debris_fraction,
+                                         verbose=verbose)
+    _raise_if_multiple_components(n_significant)
 
-    # Step 5: Close ALL holes to make mesh watertight
-    if verbose:
-        print("  Closing holes...")
-    _close_all_holes(ms, verbose=verbose)
-
-    # Step 6: Close remaining small holes (e.g., triangular holes that pymeshlab misses)
-    try:
-        info = ms.get_topological_measures()
-        if info['boundary_edges'] > 0 and info['boundary_edges'] <= 10:
-            if verbose:
-                print(f"  Closing small remaining hole ({info['boundary_edges']} boundary edges)...")
-            # Save temp, use trimesh to close triangular hole
-            try:
-                import trimesh
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.obj', delete=False) as f:
-                    temp_path = f.name
-                ms.save_current_mesh(temp_path)
-
-                tmesh = trimesh.load(temp_path)
-                from collections import Counter
-                edge_counts = Counter(tuple(sorted(e)) for e in tmesh.edges)
-                boundary_edges = [e for e, c in edge_counts.items() if c == 1]
-
-                if len(boundary_edges) == 3:
-                    # Triangular hole - add one face
-                    boundary_verts = list(set(v for e in boundary_edges for v in e))
-                    new_faces = np.vstack([tmesh.faces, boundary_verts])
-                    tmesh = trimesh.Trimesh(vertices=tmesh.vertices, faces=new_faces, process=True)
-                    tmesh.fix_normals()
-                    tmesh.export(temp_path)
-
-                    # Reload in pymeshlab
-                    ms = pymeshlab.MeshSet()
-                    ms.load_new_mesh(temp_path)
-                    if verbose:
-                        print("    Closed triangular hole")
-
-                Path(temp_path).unlink()
-            except ImportError:
-                if verbose:
-                    print("    trimesh not available for small hole fix")
-    except Exception:
-        pass
+    # Step 5: Close holes (OFF by default).
+    # RSP tolerates boundaries, and closing holes destroys intentional
+    # openings, so this only runs when explicitly requested.
+    if close_holes:
+        if verbose:
+            print("  Closing holes...")
+        _close_all_holes(ms, verbose=verbose)
 
     # Step 7: Re-orient faces consistently
     if verbose:
@@ -264,15 +311,20 @@ def preprocess_mesh(
             print(f"  Decimating from {current_faces} to ~{target_faces} faces...")
         try:
             ms.meshing_decimation_quadric_edge_collapse(targetfacenum=target_faces)
-            # Decimation can split the surface and open new holes. Repair
-            # non-manifold geometry, drop any newly disconnected debris and
-            # re-close holes so the result stays a single watertight surface.
+            # Decimation can leave tiny disconnected slivers. Repair
+            # non-manifold geometry and strip only that debris (legitimate
+            # parts are preserved).
             try:
                 ms.meshing_repair_non_manifold_edges()
             except Exception:
                 pass
-            _keep_largest_connected_component(ms, verbose=verbose)
-            _close_all_holes(ms, verbose=verbose)
+            n_significant = _remove_small_debris(
+                ms, debris_fraction=debris_fraction, verbose=verbose)
+            _raise_if_multiple_components(n_significant)
+            if close_holes:
+                _close_all_holes(ms, verbose=verbose)
+        except ValueError:
+            raise
         except Exception as e:
             if verbose:
                 print(f"    Decimation failed: {e}")
@@ -309,12 +361,13 @@ def preprocess_mesh(
     ms.meshing_remove_duplicate_vertices()
     ms.meshing_remove_unreferenced_vertices()
 
-    # Step 9b: Final robustness pass before RSP.
-    # Guarantee a single connected component and a watertight surface even if
-    # the previous steps (decimation, remeshing, hole closing) reintroduced
-    # disconnections or holes. Both helpers are no-ops when already satisfied.
-    _keep_largest_connected_component(ms, verbose=verbose)
-    _close_all_holes(ms, verbose=verbose)
+    # Step 9b: Final non-destructive safety pass before RSP.
+    # Strip any debris reintroduced by remeshing and confirm the mesh is a
+    # single significant component. We never fill holes here (RSP tolerates
+    # boundaries) so intentional openings survive untouched.
+    n_significant = _remove_small_debris(ms, debris_fraction=debris_fraction,
+                                         verbose=verbose)
+    _raise_if_multiple_components(n_significant)
     ms.meshing_remove_unreferenced_vertices()
 
     # Get final stats
@@ -325,17 +378,9 @@ def preprocess_mesh(
     if verbose:
         print(f"  Final: {n_verts_final} vertices, {n_faces_final} faces")
         n_border_final = _count_boundary_edges(ms)
-        try:
-            n_cc_final = ms.get_topological_measures().get(
-                'connected_components_number', None)
-        except Exception:
-            n_cc_final = None
         if n_border_final:
-            print(f"  WARNING: mesh still has {n_border_final} boundary edge(s); "
-                  f"RSP connectivity may fail.")
-        if n_cc_final is not None and int(n_cc_final) > 1:
-            print(f"  WARNING: mesh still has {int(n_cc_final)} connected "
-                  f"components; RSP requires a single component.")
+            print(f"  Note: mesh has {n_border_final} boundary edge(s) "
+                  f"(open holes preserved; RSP supports boundaries).")
 
     # Save result
     ms.save_current_mesh(str(output_path))
