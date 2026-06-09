@@ -21,6 +21,10 @@ from pathlib import Path
 from datetime import datetime
 
 
+class _QuantizationSkipped(Exception):
+    """Internal sentinel used to skip quantization gracefully (not an error)."""
+
+
 def print_banner():
     """Print welcome banner."""
     click.secho("""
@@ -120,6 +124,12 @@ def load_feature_edges_from_obj(obj_path):
               help='Multiplier for auto quantization scale [default: 1.0]')
 @click.option('--no-quads', is_flag=True,
               help='Skip quad extraction (parameterization only)')
+@click.option('--fill-holes/--no-fill-holes', default=True,
+              help='Fill small extraction-artifact holes with triangles [default: on]')
+@click.option('--max-hole-size', type=int, default=8,
+              help='Only fill holes whose boundary loop has <= this many edges [default: 8]')
+@click.option('--preserve-boundaries/--no-preserve-boundaries', default=True,
+              help='Leave holes on the original mesh boundary open (eyes, etc.) [default: on]')
 @click.option('--no-render', is_flag=True,
               help='Skip rendering PNG previews')
 @click.option('--no-uv-export', is_flag=True,
@@ -133,7 +143,8 @@ def load_feature_edges_from_obj(obj_path):
 def main(mesh, output_dir, scale, target_faces, frame_field,
          no_hardedge, no_preprocess, no_quantize, quantize_mode,
          quantize_scale, quantize_scale_auto,
-         no_quads, no_render, no_uv_export,
+         no_quads, fill_holes, max_hole_size, preserve_boundaries,
+         no_render, no_uv_export,
          no_singularities, verbose, quiet):
     """
     Generate a quad mesh from a triangle mesh.
@@ -296,6 +307,25 @@ def main(mesh, output_dir, scale, target_faces, frame_field,
                 V, T, UV, TUV = load_mesh_with_uvs(str(param_path))
                 feature_edges = load_feature_edges_from_obj(str(param_path))
 
+                # Pre-check local injectivity. pyquantization requires a seamless map
+                # with positive Jacobian per triangle (no fold-overs); a single flipped
+                # triangle aborts with "Input is not valid!". This mirrors the original
+                # RSP behaviour, which disables quantization when the map is not locally
+                # injective. We skip gracefully instead of raising a noisy traceback.
+                uv0 = UV[TUV[:, 0]]
+                uv1 = UV[TUV[:, 1]]
+                uv2 = UV[TUV[:, 2]]
+                det = ((uv1[:, 0] - uv0[:, 0]) * (uv2[:, 1] - uv0[:, 1])
+                       - (uv1[:, 1] - uv0[:, 1]) * (uv2[:, 0] - uv0[:, 0]))
+                n_flipped = int(np.sum(det <= 0.0))
+                if n_flipped > 0:
+                    warn(f"Parametrization not locally injective ({n_flipped} flipped/degenerate "
+                         f"triangles): skipping quantization. Quads will be extracted from RAW "
+                         f"UVs (libQEx tolerates fold-overs).")
+                    stats['quantized'] = False
+                    stats['quantize_skipped_flips'] = n_flipped
+                    raise _QuantizationSkipped()
+
                 out_verts, out_faces, out_uvs, out_uv_tris, out_feats = quantize_mesh(
                     V, T, UV, TUV,
                     feature_edges=feature_edges,
@@ -318,6 +348,8 @@ def main(mesh, output_dir, scale, target_faces, frame_field,
                     success(f"Saved: {quantiz_path.name} "
                             f"({out_verts.shape[0]} verts, {out_faces.shape[0]} faces)")
 
+            except _QuantizationSkipped:
+                pass
             except ImportError:
                 warn("pyquantization not installed. Skipping quantization.")
                 warn("Install with: pip install pyquantization")
@@ -358,7 +390,11 @@ def main(mesh, output_dir, scale, target_faces, frame_field,
                     uv_per_tri_q *= quant_extract_scale
 
                     quad_verts, quad_faces, tri_faces = extract_quads(
-                        V_q, T_q, uv_per_tri_q, verbose=verbose
+                        V_q, T_q, uv_per_tri_q,
+                        fill_holes=fill_holes,
+                        max_hole_size=max_hole_size,
+                        preserve_boundaries=preserve_boundaries,
+                        verbose=verbose
                     )
                     n_quads = len(quad_faces)
                     n_tris_fill = len(tri_faces) if tri_faces is not None else 0
@@ -392,7 +428,11 @@ def main(mesh, output_dir, scale, target_faces, frame_field,
                 uv_per_tri_r *= scale
 
                 quad_verts_r, quad_faces_r, tri_faces_r = extract_quads(
-                    V_r, T_r, uv_per_tri_r, verbose=verbose
+                    V_r, T_r, uv_per_tri_r,
+                    fill_holes=fill_holes,
+                    max_hole_size=max_hole_size,
+                    preserve_boundaries=preserve_boundaries,
+                    verbose=verbose
                 )
                 n_quads_r = len(quad_faces_r)
                 n_tris_fill_r = len(tri_faces_r) if tri_faces_r is not None else 0

@@ -297,7 +297,78 @@ def _fill_holes_with_triangles(vertices, quads, verbose=True, max_hole_size=None
     return triangles, np.array(new_vertices) if new_vertices else np.zeros((0, 3))
 
 
-def extract_quads(vertices, triangles, uv_per_triangle, vertex_valences=None, fill_holes=True, max_hole_size=None, verbose=True):
+def _compute_boundary_vertex_set(vertices, triangles, quad_vertices, tol=None, verbose=True):
+    """
+    Identify which quad-mesh vertices lie on the *original* triangle-mesh boundary.
+
+    The quad mesh produced by libQEx uses a brand new vertex set whose indices are
+    unrelated to the input mesh. To preserve intentional openings (eyes, nostrils,
+    open boundaries) we map them back by 3D position: any quad vertex that coincides
+    (within ``tol``) with an input boundary vertex is flagged.
+
+    Parameters
+    ----------
+    vertices : ndarray, shape (n_verts, 3)
+        Input triangle-mesh vertex positions.
+    triangles : ndarray, shape (n_tris, 3)
+        Input triangle indices (0-based).
+    quad_vertices : ndarray, shape (n_quad_verts, 3)
+        Quad-mesh vertex positions returned by libQEx.
+    tol : float or None
+        Matching tolerance. If None, derived from the bounding-box diagonal.
+    verbose : bool
+        Print a short summary.
+
+    Returns
+    -------
+    set of int
+        Indices into ``quad_vertices`` that sit on the original mesh boundary.
+        Empty set if the input mesh is closed (no boundary to preserve).
+    """
+    # Boundary edges of the input mesh appear in exactly one triangle.
+    edge_count = defaultdict(int)
+    for tri in triangles:
+        for i in range(3):
+            a, b = int(tri[i]), int(tri[(i + 1) % 3])
+            edge_count[(min(a, b), max(a, b))] += 1
+
+    boundary_vids = set()
+    for (a, b), c in edge_count.items():
+        if c == 1:
+            boundary_vids.add(a)
+            boundary_vids.add(b)
+
+    if not boundary_vids:
+        return set()
+
+    boundary_xyz = np.asarray(vertices, dtype=np.float64)[sorted(boundary_vids)]
+
+    if tol is None:
+        bbox = vertices.max(axis=0) - vertices.min(axis=0)
+        diag = float(np.linalg.norm(bbox))
+        tol = max(diag * 1e-5, 1e-9)
+
+    quad_vertices = np.asarray(quad_vertices, dtype=np.float64)
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(boundary_xyz)
+        dist, _ = tree.query(quad_vertices, k=1)
+        matched = set(np.nonzero(dist <= tol)[0].tolist())
+    except Exception:
+        matched = set()
+        for i, qv in enumerate(quad_vertices):
+            d = float(np.min(np.linalg.norm(boundary_xyz - qv, axis=1)))
+            if d <= tol:
+                matched.add(i)
+
+    if verbose:
+        print(f"  Boundary preservation: {len(matched)} quad verts on original boundary "
+              f"({len(boundary_vids)} input boundary verts, tol={tol:.2e})")
+
+    return matched
+
+
+def extract_quads(vertices, triangles, uv_per_triangle, vertex_valences=None, fill_holes=True, max_hole_size=None, preserve_boundaries=True, verbose=True):
     """
     Extract a quad mesh from a triangle mesh with UV parameterization.
 
@@ -314,6 +385,12 @@ def extract_quads(vertices, triangles, uv_per_triangle, vertex_valences=None, fi
         Expected valence at each vertex (passed to libQEx).
     fill_holes : bool
         If True (default), fill holes at irregular vertices with triangles.
+    max_hole_size : int or None
+        If set, holes whose boundary loop has more than this many edges are left
+        open (treated as intentional openings rather than extraction artifacts).
+    preserve_boundaries : bool
+        If True (default), holes whose vertices all lie on the original mesh
+        boundary are left open (preserves intentional openings such as eyes).
     verbose : bool
         Print information about hole filling.
 
@@ -371,7 +448,14 @@ def extract_quads(vertices, triangles, uv_per_triangle, vertex_valences=None, fi
     # Fill holes with triangles if requested
     tri_faces = None
     if fill_holes and len(quad_faces) > 0:
-        hole_tris, new_verts = _fill_holes_with_triangles(quad_vertices, quad_faces, verbose=verbose, max_hole_size=max_hole_size)
+        original_boundary_verts = None
+        if preserve_boundaries:
+            original_boundary_verts = _compute_boundary_vertex_set(
+                vertices, triangles, quad_vertices, verbose=verbose)
+        hole_tris, new_verts = _fill_holes_with_triangles(
+            quad_vertices, quad_faces, verbose=verbose,
+            max_hole_size=max_hole_size,
+            original_boundary_verts=original_boundary_verts)
         if hole_tris:
             tri_faces = np.array(hole_tris, dtype=np.int32)
             if len(new_verts) > 0:
