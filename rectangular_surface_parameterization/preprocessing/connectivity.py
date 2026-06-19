@@ -99,9 +99,15 @@ def connectivity(T):
     # E2T = [E2T, edgeSg, -edgeSg];
 
     # Build E2T: for each edge, find the two triangles (or one if boundary)
-    # MATLAB approach: sort edge indices and use the sorted indices to find triangles
+    # MATLAB approach: sort edge indices and use the sorted indices to find triangles.
+    # MATLAB's sort is stable; numpy's default 'quicksort' is NOT. For interior edges
+    # both occurrences share the same edge id, so an unstable sort assigns tri0/tri1 in
+    # a numpy-version-dependent order. That flips the per-edge dihedral sign in
+    # curvature_field.py and makes the curvature tensor (kappa/Curv) non-deterministic
+    # and geometrically inconsistent. Use kind='stable' to restore MATLAB-equivalent,
+    # deterministic ordering (also what the C++ port produces).
     all_edges = np.concatenate([e1, e2, e3, bound])
-    idx = np.argsort(all_edges)
+    idx = np.argsort(all_edges, kind="stable")
 
     # Convert sorted indices to triangle indices
     # Indices 0 to 3*nf-1 correspond to triangles, indices >= 3*nf are boundary markers
