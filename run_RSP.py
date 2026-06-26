@@ -130,10 +130,16 @@ Examples:
                         help='File with explicit hard edge vertex pairs (one "v1 v2" per line, 0-indexed). '
                              'These edges will be treated as hard edges in addition to dihedral-detected ones.')
 
-    # Visualization
+    # Visualization (Meshora sets MESHORA_NO_RSP_VIZ=1 to skip stage PNGs in addon use)
+    _viz_default = (
+        'none'
+        if os.environ.get('MESHORA_NO_RSP_VIZ', '').lower() in ('1', 'true', 'yes')
+        else '1,2,3,4,5'
+    )
     parser.add_argument('--plot', action='store_true',
                         help='Show interactive matplotlib plots')
-    parser.add_argument('--visualize', type=str, nargs='?', const='1,2,3,4,5', default='1,2,3,4,5',
+    parser.add_argument('--visualize', type=str, nargs='?', const='1,2,3,4,5',
+                        default=_viz_default,
                         metavar='STAGES',
                         help='Stages to visualize as comma-separated list (default: 1,2,3,4,5 = all). '
                              'Use --visualize "" or --visualize none to disable. '

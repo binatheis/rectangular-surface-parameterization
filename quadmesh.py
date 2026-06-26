@@ -132,6 +132,8 @@ def load_feature_edges_from_obj(obj_path):
               help='Leave holes on the original mesh boundary open (eyes, etc.) [default: on]')
 @click.option('--no-render', is_flag=True,
               help='Skip rendering PNG previews')
+@click.option('--no-visualize', is_flag=True,
+              help='Skip run_RSP stage PNGs (stage1–stage5); faster for batch/addon use')
 @click.option('--no-uv-export', is_flag=True,
               help='Skip UV data JSON export')
 @click.option('--no-singularities', is_flag=True,
@@ -144,7 +146,7 @@ def main(mesh, output_dir, scale, target_faces, frame_field,
          no_hardedge, no_preprocess, no_quantize, quantize_mode,
          quantize_scale, quantize_scale_auto,
          no_quads, fill_holes, max_hole_size, preserve_boundaries,
-         no_render, no_uv_export,
+         no_render, no_visualize, no_uv_export,
          no_singularities, verbose, quiet):
     """
     Generate a quad mesh from a triangle mesh.
@@ -255,6 +257,8 @@ def main(mesh, output_dir, scale, target_faces, frame_field,
         ]
         if no_hardedge:
             rsp_args.append("--no-hardedge")
+        if no_visualize:
+            rsp_args.extend(["--visualize", "none"])
         if verbose:
             rsp_args.append("-v")
 
