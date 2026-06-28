@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rectangular-surface-parameterization"
-version = "0.1.0"
+version = "0.1.1"
 description = "Rectangular (orthogonal) surface parameterization for quad meshing - Python port of Corman & Crane SIGGRAPH 2025"
 readme = "README.md"
 license = {text = "MIT"}
